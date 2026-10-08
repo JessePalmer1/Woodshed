@@ -3,6 +3,19 @@
  * an AnalyserNode for the live level meter. Analysis is deferred until stop.
  */
 
+/**
+ * Thrown when the page isn't a secure context, so `navigator.mediaDevices`
+ * doesn't exist at all. Distinct from a denied permission prompt: no amount of
+ * tapping "allow" will fix it. Hits anyone opening the dev server over a LAN
+ * IP from their phone — https (or localhost) is the only way through.
+ */
+export class InsecureContextError extends Error {
+  constructor() {
+    super("microphone capture requires a secure context (https or localhost)");
+    this.name = "InsecureContextError";
+  }
+}
+
 export class SessionRecorder {
   private stream: MediaStream | null = null;
   private ctx: AudioContext | null = null;
@@ -10,9 +23,14 @@ export class SessionRecorder {
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private levelBuf: Uint8Array<ArrayBuffer> = new Uint8Array(0);
+  private wakeLock: WakeLockSentinel | null = null;
+  private onVisibility: (() => void) | null = null;
   startedAt = 0;
 
   async start(): Promise<void> {
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      throw new InsecureContextError();
+    }
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: false,
@@ -37,6 +55,39 @@ export class SessionRecorder {
     };
     this.recorder.start(2000); // collect in 2s chunks
     this.startedAt = Date.now();
+    void this.acquireWakeLock();
+  }
+
+  /**
+   * Keep the screen on for the length of the session — a phone propped on the
+   * music stand shouldn't dim out thirty seconds into a scale. The lock is
+   * dropped by the browser whenever the tab is hidden, so we re-take it on the
+   * way back; unsupported browsers just carry on without one.
+   */
+  private async acquireWakeLock(): Promise<void> {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      this.wakeLock = await navigator.wakeLock.request("screen");
+    } catch {
+      return; // denied, or battery saver is on — not worth failing the session
+    }
+    this.onVisibility = () => {
+      if (document.visibilityState === "visible" && this.recorder) {
+        void this.acquireWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", this.onVisibility);
+  }
+
+  private releaseWakeLock(): void {
+    if (this.onVisibility) {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+      this.onVisibility = null;
+    }
+    void this.wakeLock?.release().catch(() => {
+      /* already gone — the browser drops it on hide */
+    });
+    this.wakeLock = null;
   }
 
   /** Live input level, 0..1 (RMS of the current analyser frame). */
@@ -62,6 +113,7 @@ export class SessionRecorder {
       recorder.stop();
     });
 
+    this.releaseWakeLock();
     this.stream?.getTracks().forEach((t) => t.stop());
     const ctx = this.ctx!;
     const arrayBuf = await blob.arrayBuffer();
@@ -77,6 +129,7 @@ export class SessionRecorder {
   }
 
   cancel(): void {
+    this.releaseWakeLock();
     try {
       this.recorder?.stop();
     } catch {

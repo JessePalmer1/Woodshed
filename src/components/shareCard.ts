@@ -1,7 +1,10 @@
 import { FeedSession } from "../types";
 import { fmtDuration } from "../utils";
 
-/** Render a 1080×1080 share card PNG for a session and trigger a download. */
+/**
+ * Render a 1080×1080 share card PNG for a session, then hand it to the native
+ * share sheet on mobile or download it on desktop.
+ */
 export function exportShareCard(session: FeedSession, userName: string, instrument: string) {
   const size = 1080;
   const canvas = document.createElement("canvas");
@@ -100,12 +103,46 @@ export function exportShareCard(session: FeedSession, userName: string, instrume
     1052
   );
 
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `woodshed-${new Date(session.startedAt).toISOString().slice(0, 10)}.png`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  }, "image/png");
+  const filename = `woodshed-${new Date(session.startedAt).toISOString().slice(0, 10)}.png`;
+
+  // toDataURL rather than toBlob, deliberately: toBlob's callback runs in a
+  // later task, by which time Safari has retired the tap's user activation and
+  // navigator.share throws NotAllowedError. Staying synchronous keeps the
+  // share sheet inside the gesture that asked for it.
+  const blob = dataUrlToBlob(canvas.toDataURL("image/png"));
+  const file = new File([blob], filename, { type: "image/png" });
+
+  // Phones: hand it to the native share sheet, where Instagram, Messages and
+  // "Save Image" all live. iOS Safari ignores <a download> anyway — it would
+  // open the PNG in a new tab instead of saving it.
+  if (navigator.canShare?.({ files: [file] })) {
+    navigator
+      .share({ files: [file], title: "My practice session" })
+      .catch((err: DOMException) => {
+        // Dismissing the sheet is a choice, not a failure.
+        if (err?.name !== "AbortError") downloadBlob(blob, filename);
+      });
+    return;
+  }
+
+  downloadBlob(blob, filename);
+}
+
+/** Synchronous base64 → Blob, so the share sheet stays within the user gesture. */
+function dataUrlToBlob(dataUrl: string): Blob {
+  const bytes = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+  const buf = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+  return new Blob([buf], { type: "image/png" });
+}
+
+/** Desktop path: a real anchor, in the DOM — detached ones no-op in Firefox. */
+function downloadBlob(blob: Blob, filename: string): void {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { SessionRecorder } from "../audio/recorder";
+import { InsecureContextError, SessionRecorder } from "../audio/recorder";
 import { analyzeSession } from "../audio/analysis";
 import { synthesizeClip } from "../audio/synth";
 import { SessionAnalysis } from "../types";
@@ -39,9 +39,11 @@ export function RecordScreen({ onDraft }: { onDraft: (d: DraftData) => void }) {
     const rec = new SessionRecorder();
     try {
       await rec.start();
-    } catch {
+    } catch (e) {
       setError(
-        "Woodshed needs microphone access to log your session. Allow the mic and try again — audio never leaves your device."
+        e instanceof InsecureContextError
+          ? "This browser only allows the microphone over a secure connection. Open Woodshed on localhost or over https to record — the feed and the demo session work fine here."
+          : "Woodshed needs microphone access to log your session. Allow the mic and try again — audio never leaves your device."
       );
       return;
     }
